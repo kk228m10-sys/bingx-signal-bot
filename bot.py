@@ -91,6 +91,12 @@ def send(text, chat_id=None):
     try:
         tg("sendMessage", chat_id=chat_id or ADMIN_ID, text=text, parse_mode="HTML",
            disable_web_page_preview="true")
+    except urllib.error.HTTPError as e:
+        try:
+            desc = json.loads(e.read().decode("utf-8")).get("description")
+        except Exception:
+            desc = ""
+        log.error("send failed: HTTP %s %s", e.code, desc)
     except Exception as e:
         log.error("send failed: %s", e)
 
@@ -288,6 +294,7 @@ def handle(st, msg):
         return
     cmd, *args = text.split()
     cmd = cmd.split("@")[0].lower()
+    log.info("command %s %s", cmd, " ".join(args))
     se = st["settings"]
 
     if cmd in ("/start", "/help"):
