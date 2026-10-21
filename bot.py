@@ -312,10 +312,12 @@ def scan(st, manual=False):
             act_key = f"{sym}:{side}"
             if not cs or time.time() - st["cooldown"].get(act_key, 0) < COOLDOWN_H * 3600:
                 continue
+            live = TRADING_MODE == "live"
             chosen = why = None
             for s, sz, rec in cs:
-                ok, why = ln.decide(s, st["signals"], live=TRADING_MODE == "live")
-                if ok:
+                ok, why = ln.decide(s, st["signals"], live=live)
+                rec["advice"] = "" if ok else why          # kept to check later whether the advice was right
+                if ok or not live:                          # demo: advice only, keep exploring
                     chosen = (s, sz, rec)
                     break
             if not chosen:
@@ -323,6 +325,9 @@ def scan(st, manual=False):
                 note(st, sym, side, cs[0][0]["variant"], "blocked", why)
                 continue
             s, sz, rec = chosen
+            if rec.get("advice"):
+                s["why"] = (s.get("why") or []) + [f"⚠️ Обучение советовало бы пропустить: {rec['advice']}. "
+                                                   f"На демо всё равно вхожу, чтобы проверить совет."]
             st["cooldown"][act_key] = time.time()
             if TRADER and se.get("auto") and not manual:
                 execute(st, s, sz, ctx, contract)

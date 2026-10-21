@@ -40,6 +40,12 @@ class Learner(unittest.TestCase):
         hist = [sig(r, symbol=f"X{i}-USDT") for i, r in enumerate([1.5, -1, 0.8] * 8)]
         self.assertTrue(ln.decide(sig(0, symbol="NEW-USDT"), hist, live=True)[0])
 
+    def test_window_forgets_old_losses(self):
+        old = [dict(sig(-1.0, symbol=f"X{i}-USDT"), closed_t=i) for i in range(30)]
+        new = [dict(sig(r, symbol=f"Y{i}-USDT"), closed_t=100 + i) for i, r in enumerate([1.2, -1, 0.9] * 14)]
+        self.assertFalse(ln.decide(sig(0, symbol="NEW-USDT"), old)[0])
+        self.assertTrue(ln.decide(sig(0, symbol="NEW-USDT"), old + new)[0])   # last 40 are mixed/positive
+
     def test_report_renders(self):
         hist = [sig(-1.0, symbol=f"X{i % 3}-USDT") for i in range(12)]
         text = ln.report(hist)

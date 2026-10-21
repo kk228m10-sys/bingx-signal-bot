@@ -81,9 +81,11 @@ def build_view(st, mode):
     def sig_view(s):
         return {k: s.get(k) for k in ("id", "symbol", "side", "kind", "variant", "btc_htf", "entry", "stop0",
                                       "tps", "sent_at", "status", "result", "realized_r", "tp_hit",
-                                      "confidence", "why", "silent")}
+                                      "confidence", "why", "silent", "advice")}
 
     stats = tr.stats(signals) or {}
+    advised = [s for s in closed_sig if s.get("advice")]
+    advice_check = {"advised": tr.stats(advised), "not_advised": tr.stats([s for s in closed_sig if not s.get("advice")])}
     return {
         "generated_at": time.time(),
         "mode": mode,
@@ -98,10 +100,11 @@ def build_view(st, mode):
                            if t.get("status") == "closed"),
         "equity_r": _cum((s.get("sent_at") or 0, s.get("realized_r") or 0) for s in closed_sig),
         "signal_stats": stats,
+        "advice_check": advice_check,
         "signals_recent": [sig_view(s) for s in sorted(signals, key=lambda s: -(s.get("sent_at") or 0))[:150]],
         "buckets": buckets,
         "decisions": list(reversed(st.get("decisions", [])))[:150],
-        "learning_rules": {"min_n": ln.MIN_N, "symbol_min_n": ln.SYMBOL_MIN_N, "z": ln.Z,
+        "learning_rules": {"min_n": ln.MIN_N, "symbol_min_n": ln.SYMBOL_MIN_N, "z": ln.Z, "window": ln.WINDOW,
                            "proven_n": ln.PROVEN_N, "proven_mean": ln.PROVEN_MEAN},
         "variants": [{"name": n, "params": {k: (list(v) if isinstance(v, tuple) else v) for k, v in p.items()}}
                      for n, p in sg.VARIANTS],

@@ -2,13 +2,19 @@
 
 Every signal (executed or not) is followed by tracker.py until it closes with a
 result in R. Results are grouped into buckets (side, side x BTC regime, symbol,
-variant, coin group). Before a new entry, each matching bucket is checked:
+variant, coin group), each over its last WINDOW results. Before a new entry,
+each matching bucket is checked:
   * block   if n >= MIN_N and the upper bound mean + Z*sd/sqrt(n) is still below 0
             (the context loses even under an optimistic reading of the noise);
   * live mode additionally requires the variant itself to be proven:
             n >= PROVEN_N and mean > PROVEN_MEAN.
 This is deliberately conservative: with a few dozen trades per bucket, only
 clearly bad contexts can be told apart from bad luck.
+
+On the demo account the verdict is advisory (the bot still trades and records
+whether the advice would have helped); it blocks entries only on a live account.
+A walk-forward test on 25 alts (60d) showed blocking on demo would have stopped
+almost all trading while the kept trades were no better, hence advisory there.
 """
 import math
 
@@ -39,19 +45,23 @@ def buckets(sig):
     ]
 
 
-def table(signals):
-    """bucket -> {n, sum, sumsq, wins}"""
-    t = {}
-    for s in signals:
-        if s.get("status") != "closed":
-            continue
+WINDOW = 40   # only the most recent results per bucket count: markets change, old lessons fade
+
+
+def table(signals, window=WINDOW):
+    """bucket -> {n, sum, sumsq, wins} over the last `window` closed results of each bucket."""
+    closed = sorted((s for s in signals if s.get("status") == "closed"),
+                    key=lambda s: s.get("closed_t") or s.get("sent_at") or 0)
+    per = {}
+    for s in closed:
         r = s.get("realized_r") or 0.0
         for b in buckets(s):
-            e = t.setdefault(b, {"n": 0, "sum": 0.0, "sumsq": 0.0, "wins": 0})
-            e["n"] += 1
-            e["sum"] += r
-            e["sumsq"] += r * r
-            e["wins"] += r > 0.05
+            per.setdefault(b, []).append(r)
+    t = {}
+    for b, rs in per.items():
+        rs = rs[-window:] if window else rs
+        t[b] = {"n": len(rs), "sum": sum(rs), "sumsq": sum(r * r for r in rs),
+                "wins": sum(1 for r in rs if r > 0.05)}
     return t
 
 
