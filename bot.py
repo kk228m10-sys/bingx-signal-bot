@@ -669,7 +669,7 @@ def main():
                 trade_note = f"⚠️ не смог подключиться к BingX: {html.escape(str(e))[:200]} — только сигналы"
     save_state(st)
     try:
-        web.start(int(os.environ.get("PORT", "8000")), STATE_FILE, TOKEN, ADMIN_ID, TRADING_MODE)
+        web.start(int(os.environ.get("PORT", "3000")), STATE_FILE, TOKEN, ADMIN_ID, TRADING_MODE)
     except Exception as e:
         log.error("web app failed to start: %s", e)
     if WEBAPP_URL:
