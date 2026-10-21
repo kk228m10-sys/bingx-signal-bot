@@ -1,1 +1,2 @@
-# no third-party packages: standard library only
+# only needed for auto-trading (TRADING_MODE=demo|live); signals work with the standard library alone
+ccxt==4.5.89
