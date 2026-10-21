@@ -43,7 +43,7 @@ API = f"https://api.telegram.org/bot{TOKEN}"
 TRADING_MODE = os.environ.get("TRADING_MODE", "off").strip().lower()
 if TRADING_MODE not in ("off", "demo", "live"):
     TRADING_MODE = "off"
-EXECUTOR = None          # set in main() when TRADING_MODE is demo/live
+TRADER = None          # set in main() when TRADING_MODE is demo/live
 
 COOLDOWN_H = 4           # same symbol + side not repeated within this window
 DIGEST_HOUR = 9          # local hour for the morning overview
@@ -235,19 +235,19 @@ def scan(st, manual=False):
             })
             sent += 1
             log.info("signal %s %s entry=%s stop=%s tps=%s", sym, s["side"], s["entry"], s["stop"], s["tps"])
-            if EXECUTOR and not manual:
+            if TRADER and not manual:
                 execute(st, s, contract)
     save_state(st)
     return sent
 
 
 def execute(st, s, contract):
-    ok, why = EXECUTOR.can_trade(st, s["symbol"])
+    ok, why = TRADER.can_trade(st, s["symbol"])
     if not ok:
         send(f"🤖 Не вхожу: {html.escape(why)}")
         return
     try:
-        trade, msg = EXECUTOR.open_trade(st, s, contract)
+        trade, msg = TRADER.open_trade(st, s, contract)
         log.info("execute %s: %s", s["symbol"], msg)
         send(html.escape(msg))
     except Exception as e:
@@ -257,9 +257,9 @@ def execute(st, s, contract):
 
 
 def manage_trades(st):
-    if not EXECUTOR or not any(t["status"] == "open" for t in st["trades"]):
+    if not TRADER or not any(t["status"] == "open" for t in st["trades"]):
         return
-    for msg in EXECUTOR.manage(st):
+    for msg in TRADER.manage(st):
         log.info("manage: %s", msg)
         send(html.escape(msg))
     save_state(st)
@@ -292,13 +292,13 @@ def status_text(st):
     lines = [f"<b>Режим:</b> {TRADING_MODE} · автоторговля {'вкл' if se.get('auto') else 'выкл'}",
              f"Бюджет {se['balance']:g}$ · риск {min(se['risk'], 2):g}% · плечо до {se['leverage']:g}x изол. · "
              f"позиций до {se['max_positions']} · дневной стоп {se['daily_loss_pct']:g}%"]
-    if EXECUTOR:
+    if TRADER:
         try:
-            eq, free = EXECUTOR.equity()
+            eq, free = TRADER.equity()
             lines.append(f"Баланс счёта: {eq:,.2f} (свободно {free:,.2f})".replace(",", " "))
         except Exception as e:
             lines.append(f"Баланс не получен: {html.escape(str(e))[:200]}")
-        lines.append(f"Результат сегодня: {EXECUTOR.pnl_today(st):+.2f}$ · всего: {EXECUTOR.pnl_total(st):+.2f}$")
+        lines.append(f"Результат сегодня: {TRADER.pnl_today(st):+.2f}$ · всего: {TRADER.pnl_total(st):+.2f}$")
     opened = [t for t in st["trades"] if t["status"] == "open"]
     for t in opened:
         tp_done = sum(1 for x in t["tps"] if x["filled"])
@@ -320,19 +320,19 @@ def selftest(st):
     if any(t["status"] == "open" and t["symbol"] == "BTC-USDT" for t in st["trades"]):
         return "Сейчас у бота открыта сделка по BTC — самопроверку не запускаю, чтобы её не задеть."
     try:
-        eq, free = EXECUTOR.equity()
+        eq, free = TRADER.equity()
         out.append(f"1. Баланс демо: {eq:.2f} (свободно {free:.2f}) — ключи работают")
         price = m.klines("BTC-USDT", "1m", 2)[-1]["c"]
         s = {"symbol": "BTC-USDT", "side": "long", "entry": price, "stop": price * 0.98,
              "tps": [price * 1.02, price * 1.03, price * 1.04]}
-        trade, msg = EXECUTOR.open_trade(tmp, s, m.contract_info("BTC-USDT"))
+        trade, msg = TRADER.open_trade(tmp, s, m.contract_info("BTC-USDT"))
         out.append("2. " + msg)
         if trade:
-            orders = EXECUTOR.ex.fetch_open_orders("BTC/USDT:USDT")
+            orders = TRADER.ex.fetch_open_orders("BTC/USDT:USDT")
             kinds = [str((o.get("info") or {}).get("type") or o.get("type")) for o in orders]
             out.append(f"3. Ордера на бирже: {', '.join(kinds) or 'нет'}")
-            out.append("4. Закрываю: " + "; ".join(EXECUTOR.kill(tmp)))
-            left = EXECUTOR.position("BTC-USDT", "long")
+            out.append("4. Закрываю: " + "; ".join(TRADER.kill(tmp)))
+            left = TRADER.position("BTC-USDT", "long")
             out.append("5. Позиция закрыта" if not left else f"5. ВНИМАНИЕ: позиция осталась {left}")
             out.append(f"Итог теста ≈ {tmp['trades'][0]['pnl_usd']:+.4f}$ (комиссии)")
     except Exception as e:
@@ -459,7 +459,7 @@ def handle(st, msg):
     elif cmd == "/status":
         send(status_text(st))
     elif cmd == "/autotrade":
-        if not EXECUTOR:
+        if not TRADER:
             send("Автоторговля не подключена: на хостинге не заданы TRADING_MODE и ключи BingX.")
         elif args and args[0].lower() in ("on", "вкл"):
             se["auto"] = True
@@ -471,10 +471,10 @@ def handle(st, msg):
         else:
             send(f"Автоторговля: {'вкл' if se.get('auto') else 'выкл'} ({TRADING_MODE}). /autotrade on · /autotrade off")
     elif cmd == "/stop":
-        if not EXECUTOR:
+        if not TRADER:
             send("Автоторговля не подключена.")
         else:
-            msgs = EXECUTOR.kill(st)
+            msgs = TRADER.kill(st)
             send("🛑 Стоп-кран: автоторговля выключена.\n" + html.escape("\n".join(msgs)))
     elif cmd == "/limits" and args:
         try:
@@ -486,7 +486,7 @@ def handle(st, msg):
         send(f"Лимиты: позиций до {se['max_positions']}, дневной стоп {se['daily_loss_pct']:g}% бюджета, "
              f"общий стоп {se['max_dd_pct']:g}%.")
     elif cmd == "/selftest":
-        if not EXECUTOR or TRADING_MODE != "demo":
+        if not TRADER or TRADING_MODE != "demo":
             send("Самопроверка работает только в демо-режиме.")
         else:
             send("Проверяю цепочку на демо: вход минимальным лотом BTC, стоп, тейки, закрытие…")
@@ -514,7 +514,7 @@ def next_boundary(minutes, delay_s):
 def main():
     if not TOKEN or not ADMIN_ID:
         sys.exit("BOT_TOKEN and ADMIN_ID must be set in .env")
-    global EXECUTOR
+    global TRADER
     st = load_state()
     me = tg("getMe")["result"]
     log.info("started as @%s, trading mode %s", me.get("username"), TRADING_MODE)
@@ -525,13 +525,13 @@ def main():
             trade_note = f"⚠️ TRADING_MODE={TRADING_MODE}, но нет BINGX_API_KEY/BINGX_API_SECRET — только сигналы"
         else:
             try:
-                import executor
-                EXECUTOR = executor.Executor.from_env(TRADING_MODE, key, secret)
-                eq, _ = EXECUTOR.equity()
+                import trader
+                TRADER = trader.Trader.from_env(TRADING_MODE, key, secret)
+                eq, _ = TRADER.equity()
                 trade_note = (f"🤖 автоторговля {'ДЕМО' if TRADING_MODE == 'demo' else 'НА РЕАЛЬНОМ СЧЁТЕ'}: "
                               f"{'вкл' if st['settings'].get('auto') else 'выкл'}, баланс {eq:,.2f}").replace(",", " ")
             except Exception as e:
-                log.error("executor init failed:\n%s", traceback.format_exc())
+                log.error("TRADER init failed:\n%s", traceback.format_exc())
                 trade_note = f"⚠️ не смог подключиться к BingX: {html.escape(str(e))[:200]} — только сигналы"
     send(f"✅ Бот запущен. Слежу за: {', '.join(st['settings']['watch'])}.\n{trade_note}\n/help — команды.")
 

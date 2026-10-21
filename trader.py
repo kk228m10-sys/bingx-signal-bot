@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import signals as sg
 
-log = logging.getLogger("executor")
+log = logging.getLogger("TRADER")
 
 MAX_RISK_PCT = 2.0
 MMR = 0.005
@@ -43,7 +43,7 @@ def _today():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-class Executor:
+class Trader:
     def __init__(self, ex, mode):
         self.ex = ex
         self.mode = mode

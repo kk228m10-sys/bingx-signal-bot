@@ -5,7 +5,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import executor as exm  # noqa: E402
+import trader as exm  # noqa: E402
 
 BTC = {"min_qty": 0.0001, "qty_step": 0.0001, "taker_fee": 0.0005}
 
@@ -104,12 +104,12 @@ def state(**over):
 SIG = {"symbol": "BTC-USDT", "side": "long", "entry": 100.0, "stop": 98.0, "tps": [102.0, 104.0, 106.0]}
 
 
-@mock.patch("executor.time.sleep", lambda s: None)
+@mock.patch("trader.time.sleep", lambda s: None)
 class OpenTrade(unittest.TestCase):
     def test_happy_path_long(self):
         fx = FakeExchange()
         st = state()
-        tr, msg = exm.Executor(fx, "demo").open_trade(st, SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
+        tr, msg = exm.Trader(fx, "demo").open_trade(st, SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
         self.assertIsNotNone(tr, msg)
         self.assertIn(("margin", "isolated"), fx.calls)
         entry = [c for c in fx.calls if c[0] == "order"][0]
@@ -123,46 +123,46 @@ class OpenTrade(unittest.TestCase):
     def test_leverage_capped_so_liquidation_is_beyond_stop(self):
         fx = FakeExchange()
         s = {**SIG, "stop": 96.0}                                  # 4% stop
-        exm.Executor(fx, "demo").open_trade(state(leverage=20), s, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
+        exm.Trader(fx, "demo").open_trade(state(leverage=20), s, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
         self.assertLessEqual(fx.leverage, 1 / (0.04 * 1.3 + 0.005))
         self.assertLess(fx.leverage, 20)
 
     def test_risk_capped_at_two_percent(self):
         fx = FakeExchange()
-        tr, _ = exm.Executor(fx, "demo").open_trade(state(risk=5), SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
+        tr, _ = exm.Trader(fx, "demo").open_trade(state(risk=5), SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
         self.assertLessEqual(tr["risk_usd"], 1.0 + 1e-9)
 
     def test_skip_when_min_lot_too_big(self):
         fx = FakeExchange()
-        tr, msg = exm.Executor(fx, "demo").open_trade(state(), SIG, {**BTC, "qty_step": 1, "min_qty": 1})
+        tr, msg = exm.Trader(fx, "demo").open_trade(state(), SIG, {**BTC, "qty_step": 1, "min_qty": 1})
         self.assertIsNone(tr)
         self.assertIn("пропуск", msg)
         self.assertFalse(fx.pos)
 
     def test_missing_stop_is_placed_separately(self):
         fx = FakeExchange(attach_stop=False)
-        tr, _ = exm.Executor(fx, "demo").open_trade(state(), SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
+        tr, _ = exm.Trader(fx, "demo").open_trade(state(), SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
         self.assertIsNotNone(tr)
         self.assertTrue(any(o["type"] == "STOP_MARKET" for o in fx.orders.values()))
 
     def test_no_stop_possible_closes_position(self):
         fx = FakeExchange(attach_stop=False, fail_stop=True)
-        tr, msg = exm.Executor(fx, "demo").open_trade(state(), SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
+        tr, msg = exm.Trader(fx, "demo").open_trade(state(), SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
         self.assertIsNone(tr)
         self.assertIn("АВАРИЯ", msg)
         self.assertEqual(fx.pos[("BTC/USDT:USDT", "long")]["qty"], 0)
 
     def test_one_way_mode_uses_both(self):
         fx = FakeExchange(hedged=False)
-        exm.Executor(fx, "demo").open_trade(state(), SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
+        exm.Trader(fx, "demo").open_trade(state(), SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
         self.assertIn(("leverage", fx.leverage, "BOTH"), fx.calls)
 
 
-@mock.patch("executor.time.sleep", lambda s: None)
+@mock.patch("trader.time.sleep", lambda s: None)
 class Manage(unittest.TestCase):
     def setUp(self):
         self.fx = FakeExchange()
-        self.ex = exm.Executor(self.fx, "demo")
+        self.ex = exm.Trader(self.fx, "demo")
         self.st = state()
         self.tr, _ = self.ex.open_trade(self.st, SIG, {**BTC, "qty_step": 0.01, "min_qty": 0.01})
 
@@ -200,7 +200,7 @@ class Manage(unittest.TestCase):
 
 class Limits(unittest.TestCase):
     def test_limits(self):
-        ex = exm.Executor(FakeExchange(), "demo")
+        ex = exm.Trader(FakeExchange(), "demo")
         st = state()
         self.assertTrue(ex.can_trade(st, "BTC-USDT")[0])
         st["trades"].append({"symbol": "BTC-USDT", "status": "open"})
