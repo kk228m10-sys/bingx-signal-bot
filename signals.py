@@ -25,7 +25,20 @@ PARAMS = {
     "kinds": ("bounce",),
     "stop_min_pct": 0.15,
     "stop_max_pct": 3.0,
+    # altcoins follow BTC: "off" | "soft" (no longs if BTC htf <= -3, no shorts if >= 3)
+    # | "strict" (longs need BTC htf >= 1, shorts need <= -1)
+    "btc_filter": "off",
 }
+
+
+# Variants run side by side; every setup of every variant is tracked for learning.
+# Order = priority when several fire on the same coin and side. "base" is the backtested rule set
+# (+0.12R/trade out-of-sample on BTC/ETH/SOL; negative on alts, see README). The others explore.
+VARIANTS = [
+    ("base", {}),
+    ("retest", {"kinds": ("retest",)}),
+    ("range", {"trend_only": False}),
+]
 
 
 # --------------------------------------------------------------------------- context
@@ -119,6 +132,12 @@ def find_setups(ctx, p=None):
     tmin = p["trend_min"] if p["trend_only"] else None
     long_ok = (htf >= tmin if tmin else htf >= -2) and ctx["rsi1h"] < 68 and funding < FUNDING_MAX
     short_ok = (htf <= -tmin if tmin else htf <= 2) and ctx["rsi1h"] > 32 and funding > -FUNDING_MAX
+    btc = ctx.get("btc_htf")
+    if btc is not None and not ctx["symbol"].startswith("BTC-"):
+        if p["btc_filter"] == "soft":
+            long_ok, short_ok = long_ok and btc > -3, short_ok and btc < 3
+        elif p["btc_filter"] == "strict":
+            long_ok, short_ok = long_ok and btc >= 1, short_ok and btc <= -1
 
     for level, touches in sorted(strong, key=lambda x: abs(x[0] - b["c"])):
         if "bounce" in p["kinds"]:
@@ -195,7 +214,54 @@ def _make(ctx, p, side, kind, level, touches, bar, stop):
         return s
     s["confidence"] = _confidence(side, htf_score(ctx), kind, touches)
     s["ok"] = True
+    s["why"] = explain(ctx, s, p, bar)
     return s
+
+
+def explain(ctx, s, p, bar):
+    """Plain-language reasons for a setup, stored with the signal and shown in the mini app."""
+    long_ = s["side"] == "long"
+    a = ctx["atr1h"]
+    fp = lambda x: fmt_price(x)
+    htf = htf_score(ctx)
+    rng = bar["h"] - bar["l"] or 1e-12
+    wick = (min(bar["o"], bar["c"]) - bar["l"]) if long_ else (bar["h"] - max(bar["o"], bar["c"]))
+    out = [f"Уровень {fp(s['level'])}: цена разворачивалась от этой зоны {s['touches']} раз(а) "
+           f"на графиках 1h/4h — сильная поддержка/сопротивление."]
+    if s["kind"] == "bounce":
+        out.append(f"Часовая свеча ткнулась в уровень и закрылась {'выше' if long_ else 'ниже'} него; "
+                   f"тень {wick / rng * 100:.0f}% свечи — {'покупатели выкупили' if long_ else 'продавцы сбили'} движение.")
+    else:
+        out.append("Уровень пробит часовой свечой на объёме ≥1.5× среднего, цена вернулась к нему "
+                   "и удержалась — пробитое сопротивление стало поддержкой (или наоборот).")
+    if (htf >= 3 and long_) or (htf <= -3 and not long_):
+        trend = "сделка по старшему тренду"
+    elif (htf <= -3 and long_) or (htf >= 3 and not long_):
+        trend = "сделка против старшего тренда (повышенный риск)"
+    else:
+        trend = "старший тренд нейтральный"
+    out.append(f"Старший тренд: дневка {ctx['score_d1']:+d}, 4h {ctx['score_h4']:+d} "
+               f"(сумма {htf:+d} из ±10) — {trend}.")
+    btc = ctx.get("btc_htf")
+    if btc is not None and not s["symbol"].startswith("BTC-"):
+        reg = "растёт" if btc >= 3 else "падает" if btc <= -3 else "в боковике"
+        with_btc = (btc >= 0) if long_ else (btc <= 0)
+        if p["btc_filter"] == "off":
+            out.append(f"Биткоин {reg} (тренд {btc:+d}) — сделка {'по' if with_btc else 'против'} BTC. "
+                       f"Фильтр по BTC выключен: на истории он не улучшал результат; обучение следит за этим отдельно.")
+        else:
+            out.append(f"Биткоин {reg} (тренд {btc:+d}); фильтр по BTC «{p['btc_filter']}» пропускает эту сделку: "
+                       f"альты обычно идут за BTC.")
+    out.append(f"RSI 1h {ctx['rsi1h']:.0f}: {'нет перекупленности' if long_ else 'нет перепроданности'}, "
+               f"запас хода есть.")
+    if ctx.get("funding") is not None:
+        out.append(f"Funding {ctx['funding'] * 100:.3f}% за 8ч — толпа не перекошена в одну сторону.")
+    out.append(f"Стоп {fp(s['stop'])} ({abs(s['entry'] - s['stop']) / s['entry'] * 100:.2f}%): за уровнем и тенью "
+               f"плюс запас {p['stop_atr']}×ATR(1h)={fp(p['stop_atr'] * a)}. Если цена туда дошла — идея сломана.")
+    out.append("Тейки ставлю чуть раньше следующих уровней, где цена уже разворачивалась: "
+               + ", ".join(f"{fp(tp)} ({r:.1f}R)" for tp, r in zip(s["tps"], s["tp_r"]))
+               + f". После первого тейка стоп переносится в безубыток.")
+    return out
 
 
 # --------------------------------------------------------------------------- sizing

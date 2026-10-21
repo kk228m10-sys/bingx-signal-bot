@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Панель бота</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --bg2: var(--tg-theme-secondary-bg-color, #f2f3f5);
+    --text: var(--tg-theme-text-color, #15171a);
+    --hint: var(--tg-theme-hint-color, #7d8590);
+    --link: var(--tg-theme-link-color, #2f80ed);
+    --accent: var(--tg-theme-button-color, #2f80ed);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --green: #1f9d55;
+    --red: #d64545;
+    --amber: #c27c0e;
+    --line: color-mix(in srgb, var(--hint) 22%, transparent);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg2); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 12px 16px 0;
+    border-bottom: 1px solid var(--line); }
+  .top { display: flex; align-items: center; gap: 8px; }
+  .top h1 { font-size: 17px; margin: 0; flex: 1; }
+  .badge { font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 3px 8px; border-radius: 99px;
+    background: var(--bg2); color: var(--hint); text-transform: uppercase; }
+  .badge.demo { background: color-mix(in srgb, var(--amber) 16%, transparent); color: var(--amber); }
+  .badge.live { background: color-mix(in srgb, var(--red) 16%, transparent); color: var(--red); }
+  .badge.on { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+  .sub { color: var(--hint); font-size: 12px; margin: 4px 0 8px; }
+  nav { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  nav button { flex: none; border: 0; background: none; color: var(--hint); font: inherit; font-size: 14px;
+    padding: 8px 10px 10px; border-bottom: 2px solid transparent; cursor: pointer; }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  main { padding: 12px 16px 40px; max-width: 760px; margin: 0 auto; }
+  section { display: none; } section.active { display: block; }
+  .card { background: var(--bg); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--hint);
+    margin: 0 0 10px; font-weight: 600; }
+  .kpis { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  @media (min-width: 520px) { .kpis { grid-template-columns: repeat(4, 1fr); } }
+  .kpi { background: var(--bg); border-radius: 14px; padding: 12px; }
+  .kpi .l { color: var(--hint); font-size: 12px; }
+  .kpi .v { font-size: 20px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .pos { color: var(--green); } .neg { color: var(--red); } .muted { color: var(--hint); }
+  .row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0;
+    border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  .row:last-child { border-bottom: 0; }
+  .trade { border-bottom: 1px solid var(--line); padding: 10px 0; }
+  .trade:last-child { border-bottom: 0; }
+  .trade .h { display: flex; align-items: center; gap: 8px; }
+  .side { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; color: #fff; }
+  .side.long { background: var(--green); } .side.short { background: var(--red); }
+  .sym { font-weight: 650; }
+  .grow { flex: 1; }
+  .meta { color: var(--hint); font-size: 13px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .tps { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .tp { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--bg2); }
+  .tp.done { background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); }
+  details { margin-top: 6px; }
+  summary { color: var(--link); cursor: pointer; font-size: 13px; }
+  details ul { margin: 6px 0 0; padding-left: 18px; }
+  details li { margin: 3px 0; font-size: 13.5px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+  th { text-align: left; color: var(--hint); font-weight: 500; font-size: 12px; padding: 4px 4px 6px; }
+  td { padding: 6px 4px; border-top: 1px solid var(--line); }
+  td.r, th.r { text-align: right; }
+  .st { font-size: 12px; padding: 1px 7px; border-radius: 99px; white-space: nowrap; }
+  .st.block { background: color-mix(in srgb, var(--red) 15%, transparent); color: var(--red); }
+  .st.proven { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
+  .st.wait { background: var(--bg2); color: var(--hint); }
+  .st.test { background: color-mix(in srgb, var(--amber) 15%, transparent); color: var(--amber); }
+  p { margin: 0 0 8px; } p:last-child { margin-bottom: 0; }
+  .explain { font-size: 14px; }
+  .empty { color: var(--hint); text-align: center; padding: 14px 0; font-size: 14px; }
+  svg { display: block; width: 100%; height: 140px; }
+  .act { font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .act.executed { color: var(--green); } .act.blocked, .act.limit { color: var(--red); }
+  .act.skipped, .act.watch, .act.shown { color: var(--hint); }
+  .err { margin: 40px 16px; text-align: center; color: var(--hint); }
+  button.refresh { border: 0; background: var(--bg2); color: var(--text); border-radius: 99px;
+    width: 30px; height: 30px; font-size: 15px; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <h1>Бот BingX</h1>
+    <span id="mode" class="badge">…</span>
+    <span id="auto" class="badge">…</span>
+    <button class="refresh" id="refresh" aria-label="Обновить">↻</button>
+  </div>
+  <div class="sub" id="updated">загрузка…</div>
+  <nav id="tabs">
+    <button data-t="overview" class="active">Обзор</button>
+    <button data-t="trades">Сделки</button>
+    <button data-t="learn">Обучение</button>
+    <button data-t="decisions">Решения</button>
+    <button data-t="rules">Правила</button>
+  </nav>
+</header>
+<main id="app"><div class="err" id="err" hidden></div>
+  <section id="overview" class="active"></section>
+  <section id="trades"></section>
+  <section id="learn"></section>
+  <section id="decisions"></section>
+  <section id="rules"></section>
+</main>
+<script>
+const tg = window.Telegram && Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const num = (x, d = 2) => x == null || isNaN(x) ? "—" : Number(x).toLocaleString("ru-RU", {minimumFractionDigits: d, maximumFractionDigits: d});
+const price = (x) => x == null ? "—" : Number(x).toLocaleString("ru-RU", {maximumSignificantDigits: 6});
+const signed = (x, d = 2, unit = "") => x == null ? "—" : `<span class="${x > 0 ? "pos" : x < 0 ? "neg" : "muted"}">${x > 0 ? "+" : ""}${num(x, d)}${unit}</span>`;
+const when = (ts) => ts ? new Date(ts * 1000).toLocaleString("ru-RU", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) : "—";
+const regime = (h) => h == null ? "—" : h >= 3 ? `растёт (${h > 0 ? "+" : ""}${h})` : h <= -3 ? `падает (${h})` : `боковик (${h > 0 ? "+" : ""}${h})`;
+const sideTag = (s) => `<span class="side ${s}">${s === "long" ? "ЛОНГ" : "ШОРТ"}</span>`;
+
+document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("active", x === b));
+  document.querySelectorAll("section").forEach((s) => s.classList.toggle("active", s.id === b.dataset.t));
+  window.scrollTo(0, 0);
+});
+
+function chart(points, label) {
+  if (!points || points.length < 2) return `<div class="empty">${label}: пока мало данных для графика</div>`;
+  const W = 600, H = 140, P = 6;
+  const xs = points.map((p) => p[0]), ys = points.map((p) => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(0, ...ys), y1 = Math.max(0, ...ys);
+  const X = (x) => P + (x - x0) / ((x1 - x0) || 1) * (W - 2 * P);
+  const Y = (y) => H - P - (y - y0) / ((y1 - y0) || 1) * (H - 2 * P);
+  const d = points.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+  const last = ys[ys.length - 1], col = last >= 0 ? "var(--green)" : "var(--red)";
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(label)}">
+    <line x1="0" x2="${W}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--line)" stroke-dasharray="4 4"/>
+    <path d="${d}" fill="none" stroke="${col}" stroke-width="2.2" vector-effect="non-scaling-stroke"/></svg>
+    <div class="meta">${esc(label)}: ${signed(last, 2)} · ${points.length} точек</div>`;
+}
+
+function tradeCard(t) {
+  const tps = (t.tps || []).map((x) => `<span class="tp ${x.filled ? "done" : ""}">${x.filled ? "✓ " : ""}${price(x.price)}</span>`).join("");
+  const res = t.status === "closed" ? `<div class="meta">Итог: ${signed(t.pnl_usd, 2, "$")} · закрыта ${when(t.closed_at)}</div>` : "";
+  const why = t.why && t.why.length ? `<details><summary>Почему вошёл</summary><ul>${t.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : "";
+  return `<div class="trade"><div class="h">${sideTag(t.side)}<span class="sym grow">${esc(t.symbol)}</span>
+    <span class="muted">${when(t.opened_at)}</span></div>
+    <div class="meta">${num(t.qty, 4)} по ${price(t.entry)} · стоп ${price(t.stop)}${t.be_moved ? " (безубыток)" : ""} · ${t.leverage}x · риск ${num(t.risk_usd)}$ · ${esc(t.variant || "")}</div>
+    <div class="tps">${tps}</div>${res}${why}</div>`;
+}
+
+function statusOf(b, rules) {
+  if (b.blocked) return `<span class="st block">⛔ отключено</span>`;
+  if (b.kind === "variant" && b.n >= rules.proven_n && b.mean_r > rules.proven_mean) return `<span class="st proven">✓ доказан</span>`;
+  if (b.n < b.need) return `<span class="st wait">мало данных ${b.n}/${b.need}</span>`;
+  return `<span class="st test">проверяется</span>`;
+}
+
+function bucketTable(rows, rules, title, nameMap = (v) => v) {
+  if (!rows.length) return `<div class="card"><h2>${title}</h2><div class="empty">ещё нет закрытых сигналов</div></div>`;
+  return `<div class="card"><h2>${title}</h2><table><tr><th></th><th class="r">сделок</th><th class="r">винрейт</th><th class="r">средн. R</th><th class="r"></th></tr>
+    ${rows.map((b) => `<tr><td>${esc(nameMap(b.value))}</td><td class="r">${b.n}</td><td class="r">${num(b.winrate, 0)}%</td>
+      <td class="r">${signed(b.mean_r)}</td><td class="r">${statusOf(b, rules)}</td></tr>`).join("")}</table></div>`;
+}
+
+const ACT = {executed: "вошёл", blocked: "запрет обучения", limit: "лимит", skipped: "пропуск", watch: "наблюдение", shown: "сигнал в чат"};
+const sideRu = (v) => v.replace("long", "лонг").replace("short", "шорт").replace("/up", " · BTC растёт")
+  .replace("/down", " · BTC падает").replace("/flat", " · BTC боковик").replace("major", "BTC/ETH/SOL").replace("alt", "альты");
+
+function render(d) {
+  const s = d.settings, live = d.live || {}, rules = d.learning_rules;
+  $("mode").textContent = d.mode === "demo" ? "демо" : d.mode === "live" ? "реальный" : "сигналы";
+  $("mode").className = "badge " + (d.mode === "demo" ? "demo" : d.mode === "live" ? "live" : "");
+  $("auto").textContent = s.auto ? "торгует" : "не торгует";
+  $("auto").className = "badge " + (s.auto ? "on" : "");
+  $("updated").textContent = `обновлено ${when(d.generated_at)} · последний скан ${when(live.last_scan)} · монет ${live.scanned ?? "—"}`;
+
+  const closed = d.trades_closed, wins = closed.filter((t) => (t.pnl_usd || 0) > 0).length;
+  const total = closed.reduce((a, t) => a + (t.pnl_usd || 0), 0);
+  const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+  const today = closed.filter((t) => t.closed_at * 1000 >= dayStart).reduce((a, t) => a + (t.pnl_usd || 0), 0);
+  const ss = d.signal_stats || {};
+
+  $("overview").innerHTML = `
+    <div class="kpis">
+      <div class="kpi"><div class="l">Баланс счёта</div><div class="v">${live.equity != null ? num(live.equity, 0) : "—"}</div></div>
+      <div class="kpi"><div class="l">Сегодня</div><div class="v">${signed(today, 2, "$")}</div></div>
+      <div class="kpi"><div class="l">Всего (сделки бота)</div><div class="v">${signed(total, 2, "$")}</div></div>
+      <div class="kpi"><div class="l">Сделок / в плюс</div><div class="v">${closed.length} / ${wins}</div></div>
+    </div>
+    <div class="card" style="margin-top:12px"><h2>Рынок</h2>
+      <div class="row"><span>BTC</span><span>${price(live.btc_price)}</span></div>
+      <div class="row"><span>Тренд BTC (1d+4h)</span><span>${regime(live.btc_htf)}</span></div>
+      <div class="row"><span>Открыто позиций</span><span>${d.trades_open.length} из ${s.max_positions}</span></div>
+      <div class="row"><span>Бюджет · риск на сделку</span><span>${num(s.balance, 0)}$ · ${num(Math.min(s.risk, 2), 1)}%</span></div>
+    </div>
+    <div class="card"><h2>Результат сделок бота, $</h2>${chart(d.equity_usd, "накопленный результат")}</div>
+    <div class="card"><h2>Все сигналы (виртуально), R</h2>${chart(d.equity_r, "сумма R")}
+      <div class="meta">Сигналов закрыто ${ss.closed ?? 0}, винрейт ${num(ss.winrate, 0)}%, в среднем ${signed(ss.avg_r)}R. Сюда входят и сигналы, в которые бот не входил: на них он учится.</div></div>
+    <div class="card"><h2>Открытые сделки</h2>${d.trades_open.length ? d.trades_open.map(tradeCard).join("") : `<div class="empty">Сейчас позиций нет — бот ждёт сетап у сильного уровня.</div>`}</div>`;
+
+  $("trades").innerHTML = `
+    <div class="card"><h2>Открытые</h2>${d.trades_open.length ? d.trades_open.map(tradeCard).join("") : `<div class="empty">нет</div>`}</div>
+    <div class="card"><h2>Закрытые</h2>${closed.length ? closed.map(tradeCard).join("") : `<div class="empty">пока нет</div>`}</div>`;
+
+  const by = (k) => d.buckets.filter((b) => b.kind === k).sort((a, b) => b.mean_r - a.mean_r);
+  const syms = by("symbol").filter((b) => b.n >= 3);
+  $("learn").innerHTML = `
+    <div class="card explain"><h2>Как бот учится</h2>
+      <p>Каждый сетап по каждому варианту правил записывается и сопровождается до тейка или стопа — даже если бот в него не входил. Результат считается в R: 1R — это размер риска (расстояние до стопа).</p>
+      <p>Результаты группируются: по варианту правил, по направлению при разном тренде BTC, по группе монет и по каждой монете.</p>
+      <p>Группа <b>отключается</b>, если в ней накопилось не меньше ${rules.min_n} сделок (по монете — ${rules.symbol_min_n}) и даже оптимистичная оценка её среднего результата ниже нуля. Так бот не путает невезение с плохими условиями.</p>
+      <p>На реальный счёт попадают только варианты, доказавшие плюс: от ${rules.proven_n} сделок и в среднем больше +${rules.proven_mean}R.</p></div>
+    ${bucketTable(by("variant"), rules, "Варианты правил")}
+    ${bucketTable(by("side+btc"), rules, "Направление × тренд BTC", sideRu)}
+    ${bucketTable(by("group+side"), rules, "Группа монет × направление", sideRu)}
+    ${bucketTable(syms.slice(0, 10), rules, "Лучшие монеты")}
+    ${bucketTable(syms.slice(-10).reverse(), rules, "Худшие монеты")}`;
+
+  $("decisions").innerHTML = `
+    <div class="card"><h2>Что бот делал с сетапами</h2>${d.decisions.length ? d.decisions.map((x) => `
+      <div class="row"><span>${sideTag(x.side)} <b>${esc(x.symbol)}</b> <span class="muted">${esc(x.variant)} · ${when(x.t)}</span><br><span class="meta">${esc(x.reason)}</span></span>
+      <span class="act ${x.action}">${ACT[x.action] || esc(x.action)}</span></div>`).join("") : `<div class="empty">Решений ещё не было</div>`}</div>
+    <div class="card"><h2>Последние сигналы</h2>${d.signals_recent.length ? d.signals_recent.map((x) => `
+      <div class="trade"><div class="h">${sideTag(x.side)}<span class="sym grow">${esc(x.symbol)}</span>
+        <span>${x.status === "closed" ? signed(x.realized_r, 2, "R") : `<span class="muted">в работе</span>`}</span></div>
+        <div class="meta">${esc(x.variant || "base")} · вход ${price(x.entry)} · стоп ${price(x.stop0)} · ${when(x.sent_at)}${x.result ? " · " + esc(x.result) : ""}</div>
+        ${x.why && x.why.length ? `<details><summary>Почему сигнал</summary><ul>${x.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""}</div>`).join("") : `<div class="empty">пока нет</div>`}</div>`;
+
+  $("rules").innerHTML = `
+    <div class="card explain"><h2>Когда бот входит</h2>
+      <p><b>Сильный уровень</b> — цена, от которой рынок разворачивался несколько раз на 1h/4h.</p>
+      <p><b>Отбой</b> — часовая свеча коснулась уровня и закрылась обратно, оставив длинную тень: другая сторона не пустила цену.</p>
+      <p><b>Тренд</b> — вход только по направлению дневки и 4h. Для альтов дополнительно смотрю на BTC: альты обычно идут за ним.</p>
+      <p><b>Стоп</b> — за уровнем и тенью с запасом в ATR. <b>Тейки</b> — три штуки, чуть раньше следующих уровней. После первого тейка стоп в безубыток.</p></div>
+    <div class="card"><h2>Риск</h2>
+      <div class="row"><span>Риск на сделку</span><span>${num(Math.min(s.risk, 2), 1)}% от ${num(s.balance, 0)}$</span></div>
+      <div class="row"><span>Плечо</span><span>до ${num(s.leverage, 0)}x, изолированная маржа</span></div>
+      <div class="row"><span>Одновременно позиций</span><span>до ${s.max_positions}, по одной на монету</span></div>
+      <div class="row"><span>Дневной стоп</span><span>${num(s.daily_loss_pct, 0)}% бюджета</span></div>
+      <div class="row"><span>Монет в сканировании</span><span>${(s.watch || []).length} + топ-${s.universe_n}</span></div>
+      <p class="meta">Если минимальный лот монеты даёт риск больше заданного — сделка пропускается, объём никогда не увеличивается.</p></div>
+    <div class="card"><h2>Варианты правил</h2>${d.variants.map((v, i) => `<div class="row"><span><b>${esc(v.name)}</b>${i === 0 ? " · основной" : ""}</span>
+      <span class="meta">${esc(Object.entries(v.params).map(([k, x]) => k + "=" + x).join(", ") || "базовые параметры")}</span></div>`).join("")}</div>
+    <div class="card"><h2>Монеты в сканировании</h2><p class="meta">${esc([...(s.watch || []), ...d.universe].map((x) => x.split("-")[0]).join(", "))}</p></div>`;
+}
+
+async function load() {
+  if (!tg || !tg.initData) {
+    $("err").hidden = false;
+    $("err").textContent = "Откройте панель из Telegram — кнопкой «Панель» в чате с ботом.";
+    return;
+  }
+  try {
+    const r = await fetch("/api/state", {headers: {"X-Init-Data": tg.initData}});
+    if (r.status === 403) throw new Error("Нет доступа: панель открывается только у владельца бота.");
+    if (!r.ok) throw new Error("Сервер ответил " + r.status);
+    $("err").hidden = true;
+    render(await r.json());
+  } catch (e) {
+    $("err").hidden = false;
+    $("err").textContent = e.message;
+  }
+}
+$("refresh").onclick = load;
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>

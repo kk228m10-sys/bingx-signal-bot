@@ -111,7 +111,7 @@ class Trader:
         budget = se["balance"]
         if self.pnl_today(st) <= -budget * se["daily_loss_pct"] / 100:
             return False, f"дневной лимит потерь {se['daily_loss_pct']:g}% достигнут — до завтра (UTC) без входов"
-        if self.pnl_total(st) <= -budget * se["max_dd_pct"] / 100:
+        if self.mode == "live" and self.pnl_total(st) <= -budget * se["max_dd_pct"] / 100:
             se["auto"] = False
             return False, f"общая просадка больше {se['max_dd_pct']:g}% бюджета — автоторговля выключена"
         open_trades = [t for t in st.get("trades", []) if t["status"] == "open"]
@@ -187,6 +187,7 @@ class Trader:
             "qty": pos["qty"], "entry": pos["entry"], "stop": s["stop"], "stop_id": stop_id,
             "tps": tps, "be_moved": False, "leverage": lev, "risk_usd": sz["risk_usd"],
             "opened_at": time.time(), "status": "open", "pnl_usd": None, "mode": self.mode,
+            "variant": s.get("variant"), "btc_htf": s.get("btc_htf"), "why": s.get("why"),
         }
         st.setdefault("trades", []).append(trade)
         msg = (f"🤖 Открыл {'ЛОНГ' if side == 'long' else 'ШОРТ'} {sym} ({self.mode}): "

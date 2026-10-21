@@ -43,6 +43,7 @@ def update(sig, rows, now=None):
             rest = sum(w[sig["tp_hit"]:])
             sig["realized_r"] += rest * _r(sig, sig["stop"])
             sig["status"] = "closed"
+            sig["closed_t"] = b["t"] / 1000
             sig["result"] = "breakeven" if sig["tp_hit"] else "stop"
             events.append({"type": sig["result"], "price": sig["stop"], "t": b["t"]})
             break
@@ -59,6 +60,7 @@ def update(sig, rows, now=None):
                     sig["stop"] = sig["entry"] * (1 + 2 * f) if long_ else sig["entry"] * (1 - 2 * f)
                 if sig["tp_hit"] == 3 or sum(w[sig["tp_hit"]:]) == 0:
                     sig["status"] = "closed"
+                    sig["closed_t"] = b["t"] / 1000
                     sig["result"] = f"tp{sig['tp_hit']}"
                     break
             else:
@@ -70,6 +72,7 @@ def update(sig, rows, now=None):
         last = rows[-1]["c"]
         sig["realized_r"] += sum(w[sig["tp_hit"]:]) * _r(sig, last)
         sig["status"] = "closed"
+        sig["closed_t"] = rows[-1]["t"] / 1000
         sig["result"] = "expired"
         events.append({"type": "expired", "price": last, "t": rows[-1]["t"]})
     return events
@@ -95,5 +98,5 @@ def stats(signals):
         "flat": len(closed) - len(wins) - len(losses),
         "winrate": len(wins) / len(closed) * 100,
         "avg_r": sum(rs) / len(rs), "sum_r": sum(rs),
-        "usd": sum(s["realized_r"] * s["risk_usd"] for s in closed),
+        "usd": sum(s["realized_r"] * s.get("risk_usd", 0) for s in closed),
     }

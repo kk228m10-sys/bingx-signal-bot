@@ -114,6 +114,23 @@ def contract_info(symbol):
     return _contracts["data"].get(symbol)
 
 
+STABLE = {"USDC", "FDUSD", "TUSD", "DAI", "USDE", "USD1", "PYUSD", "BUSD", "USDP", "EUR", "XAUT", "PAXG"}
+
+
+def top_symbols(n=30, exclude=()):
+    """Most liquid crypto USDT perpetuals by 24h quote volume (no stables, tokenized stocks/commodities)."""
+    rows = []
+    for t in get("/openApi/swap/v2/quote/ticker") or []:
+        sym = t.get("symbol", "")
+        base = sym.split("-")[0]
+        if (not sym.endswith("-USDT") or sym.startswith("NCCO") or base in STABLE
+                or sym in exclude or not base.isalnum()):
+            continue
+        rows.append((fnum(t.get("quoteVolume")) or 0.0, sym))
+    rows.sort(reverse=True)
+    return [s for _, s in rows[:n]]
+
+
 def symbol_exists(symbol):
     return contract_info(symbol) is not None or bool(_contracts["data"]) is False
 

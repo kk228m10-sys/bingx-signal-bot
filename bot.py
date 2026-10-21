@@ -12,12 +12,15 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import learner as ln
 import market as m
 import signals as sg
 import tracker as tr
+import web
 
 ROOT = Path(__file__).resolve().parent
 
@@ -44,6 +47,7 @@ TRADING_MODE = os.environ.get("TRADING_MODE", "off").strip().lower()
 if TRADING_MODE not in ("off", "demo", "live"):
     TRADING_MODE = "off"
 TRADER = None          # set in main() when TRADING_MODE is demo/live
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()   # https address of the mini app (Bothost domain)
 
 COOLDOWN_H = 4           # same symbol + side not repeated within this window
 DIGEST_HOUR = 9          # local hour for the morning overview
@@ -58,7 +62,11 @@ DEFAULTS = {"balance": 50.0, "risk": 2.0, "leverage": 20.0,
             "watch": ["BTC-USDT", "ETH-USDT", "SOL-USDT"], "paused": False,
             # auto-trading: demo starts enabled, live must be switched on with /autotrade on
             "auto": TRADING_MODE == "demo", "max_positions": 2,
-            "daily_loss_pct": 6.0, "max_dd_pct": 30.0}
+            "daily_loss_pct": 6.0, "max_dd_pct": 30.0, "universe_n": 30}
+
+# demo is for learning: more parallel positions and a wider daily limit (the risk per trade stays the same)
+DEMO_PROFILE = {"max_positions": 5, "daily_loss_pct": 15.0}
+PROFILE_VERSION = 2
 
 
 # --------------------------------------------------------------------------- state
@@ -77,6 +85,11 @@ def load_state():
     st.setdefault("cooldown", {})
     st.setdefault("last_bar", {})
     st.setdefault("digest_day", "")
+    se = st["settings"]
+    if se.get("profile_v", 0) < PROFILE_VERSION:
+        if TRADING_MODE == "demo":
+            se.update(DEMO_PROFILE)
+        se["profile_v"] = PROFILE_VERSION
     return st
 
 
@@ -202,54 +215,151 @@ EVENT_TEXT = {
 
 # --------------------------------------------------------------------------- jobs
 
+def universe(st):
+    """Core watch list plus the most liquid alts, refreshed every 6 hours."""
+    se = st["settings"]
+    u = st.get("universe") or {}
+    if time.time() - u.get("t", 0) > 6 * 3600 or "alts" not in u:
+        try:
+            alts = m.top_symbols(int(se["universe_n"]), exclude=set(se["watch"]))
+            st["universe"] = {"t": time.time(), "alts": alts}
+            log.info("universe: %d alts", len(alts))
+        except Exception as e:
+            log.warning("universe refresh failed: %s", e)
+            st.setdefault("universe", {"t": 0, "alts": []})
+    return list(dict.fromkeys(se["watch"] + st["universe"]["alts"]))
+
+
+def note(st, sym, side, variant, action, reason=""):
+    """Decision log for the mini app: what the bot did with each setup and why."""
+    st.setdefault("decisions", []).append({"t": time.time(), "symbol": sym, "side": side,
+                                           "variant": variant, "action": action, "reason": reason})
+    del st["decisions"][:-300]
+
+
+def update_live(st):
+    """Snapshot of account and market for the mini app (it reads state.json, not live objects)."""
+    live = st.setdefault("live", {})
+    live["t"] = time.time()
+    live["paused"] = st["settings"].get("paused")
+    if TRADER:
+        try:
+            live["equity"], live["free"] = TRADER.equity()
+        except Exception as e:
+            live["error"] = str(e)[:200]
+
+
+def record_signal(st, s, sz):
+    """Every setup of every variant is followed virtually; closed results feed the learner."""
+    rec = {
+        "id": f"{s['symbol']}-{s['side']}-{s['variant']}-{s['bar_t']}", "symbol": s["symbol"],
+        "side": s["side"], "kind": s["kind"], "variant": s["variant"], "btc_htf": s.get("btc_htf"),
+        "entry": s["entry"], "stop0": s["stop"], "stop": s["stop"], "tps": s["tps"],
+        "parts": sz["parts"], "risk_usd": sz["risk_usd"], "fee": sz["fee"],
+        "confidence": s["confidence"], "sent_at": time.time(), "silent": True, "why": s.get("why"),
+        "last_t": s["bar_close"] - 1, "tp_hit": 0, "realized_r": 0.0,
+        "status": "open", "result": None,
+    }
+    st["signals"].append(rec)
+    return rec
+
+
 def scan(st, manual=False):
     se = st["settings"]
-    sent = 0
-    for sym in se["watch"]:
-        try:
-            ctx = sg.build_context(sym)
-        except Exception as e:
-            log.warning("context %s failed: %s", sym, e)
+    try:
+        btc_ctx = sg.build_context("BTC-USDT")
+    except Exception as e:
+        log.warning("BTC context failed: %s", e)
+        return 0
+    hour_t = btc_ctx["h1"][-1]["t"]
+    if not manual and st["last_bar"].get("_hour") == hour_t:
+        return 0                                   # all variants trigger on 1h closes
+    st["last_bar"]["_hour"] = hour_t
+    btc_htf = sg.htf_score(btc_ctx)
+    syms = universe(st)
+    st.setdefault("live", {}).update(btc_htf=btc_htf, btc_price=btc_ctx["price"], last_scan=time.time(),
+                                     scanned=len(syms))
+    found = shown = 0
+    contexts = {"BTC-USDT": btc_ctx}
+    with ThreadPoolExecutor(max_workers=6) as pool:          # market data is fetched in parallel
+        futures = {pool.submit(sg.build_context, s): s for s in syms if s != "BTC-USDT"}
+        for f, s in futures.items():
+            try:
+                contexts[s] = f.result()
+            except Exception as e:
+                log.warning("context %s failed: %s", s, e)
+    for sym in syms:
+        ctx = contexts.get(sym)
+        if ctx is None:
             continue
-        trig = ctx["h1"] if sg.PARAMS["trigger"] == "1h" else ctx["m15"]
-        bar_t = trig[-1]["t"]
-        if not manual and st["last_bar"].get(sym) == bar_t:
-            continue
-        st["last_bar"][sym] = bar_t
-        for s in sg.find_setups(ctx):
-            key = f"{sym}:{s['side']}"
-            if time.time() - st["cooldown"].get(key, 0) < COOLDOWN_H * 3600:
-                log.info("cooldown %s", key)
+        ctx["btc_htf"] = btc_htf
+        contract = m.contract_info(sym)
+        candidates = []
+        for vname, vp in sg.VARIANTS:
+            for s in sg.find_setups(ctx, vp):
+                key = f"{sym}:{s['side']}:{vname}"
+                if time.time() - st["cooldown"].get(key, 0) < COOLDOWN_H * 3600:
+                    continue
+                st["cooldown"][key] = time.time()
+                s.update(variant=vname, btc_htf=btc_htf)
+                sz = sg.size(s["side"], s["entry"], s["stop"], se["balance"], se["risk"], se["leverage"], contract)
+                candidates.append((s, sz, record_signal(st, s, sz)))
+                found += 1
+                log.info("setup %s %s [%s] entry=%s stop=%s", sym, s["side"], vname, s["entry"], s["stop"])
+
+        for side in ("long", "short"):
+            cs = [c for c in candidates if c[0]["side"] == side]   # VARIANTS order = priority
+            act_key = f"{sym}:{side}"
+            if not cs or time.time() - st["cooldown"].get(act_key, 0) < COOLDOWN_H * 3600:
                 continue
-            contract = m.contract_info(sym)
-            sz = sg.size(s["side"], s["entry"], s["stop"], se["balance"], se["risk"], se["leverage"], contract)
-            send(fmt_signal(s, sz, ctx, st))
-            st["cooldown"][key] = time.time()
-            st["signals"].append({
-                "id": f"{sym}-{s['side']}-{bar_t}", "symbol": sym, "side": s["side"], "kind": s["kind"],
-                "entry": s["entry"], "stop0": s["stop"], "stop": s["stop"], "tps": s["tps"],
-                "parts": sz["parts"], "risk_usd": sz["risk_usd"], "fee": sz["fee"],
-                "confidence": s["confidence"], "sent_at": time.time(),
-                "last_t": s["bar_close"] - 1, "tp_hit": 0, "realized_r": 0.0,
-                "status": "open", "result": None,
-            })
-            sent += 1
-            log.info("signal %s %s entry=%s stop=%s tps=%s", sym, s["side"], s["entry"], s["stop"], s["tps"])
-            if TRADER and not manual:
-                execute(st, s, contract)
+            chosen = why = None
+            for s, sz, rec in cs:
+                ok, why = ln.decide(s, st["signals"], live=TRADING_MODE == "live")
+                if ok:
+                    chosen = (s, sz, rec)
+                    break
+            if not chosen:
+                log.info("learner blocked %s %s: %s", sym, side, why)
+                note(st, sym, side, cs[0][0]["variant"], "blocked", why)
+                continue
+            s, sz, rec = chosen
+            st["cooldown"][act_key] = time.time()
+            if TRADER and se.get("auto") and not manual:
+                execute(st, s, sz, ctx, contract)
+                shown += 1
+            elif s["variant"] == sg.VARIANTS[0][0] and not se.get("paused"):
+                send(fmt_signal(s, sz, ctx, st))
+                rec["silent"] = False              # follow it in chat: TP / stop notifications
+                note(st, sym, side, s["variant"], "shown", "сигнал отправлен в чат")
+                shown += 1
+            else:
+                note(st, sym, side, s["variant"], "watch", "исследовательский вариант — только наблюдаю")
     save_state(st)
-    return sent
+    log.info("scan done: %d setups, %d shown", found, shown)
+    return shown
 
 
-def execute(st, s, contract):
+def execute(st, s, sz, ctx, contract):
     ok, why = TRADER.can_trade(st, s["symbol"])
     if not ok:
-        send(f"🤖 Не вхожу: {html.escape(why)}")
+        log.info("not entering %s: %s", s["symbol"], why)
+        note(st, s["symbol"], s["side"], s["variant"], "limit", why)
+        if "лимит" in why or "просадка" in why:
+            day = datetime.now(TZ).strftime("%Y-%m-%d")
+            if st.get("limit_note") != day + why:
+                st["limit_note"] = day + why
+                send(f"🤖 Пропускаю входы: {html.escape(why)}")
         return
     try:
         trade, msg = TRADER.open_trade(st, s, contract)
         log.info("execute %s: %s", s["symbol"], msg)
-        send(html.escape(msg))
+        note(st, s["symbol"], s["side"], s["variant"], "executed" if trade else "skipped", msg)
+        if trade:
+            send(fmt_signal(s, sz, ctx, st) + "\n\n" + html.escape(msg))
+        else:
+            log.info("skip %s: %s", s["symbol"], msg)
+            if "АВАРИЯ" in msg or "ошибка" in msg:
+                send(html.escape(msg))
     except Exception as e:
         log.error("execute %s failed:\n%s", s["symbol"], traceback.format_exc())
         send(f"⚠️ Ошибка входа {s['symbol']}: {html.escape(str(e))[:300]}\nПроверь позиции на BingX.")
@@ -274,6 +384,9 @@ def track(st):
             events = tr.fetch_and_update(sig)
         except Exception as e:
             log.warning("track %s failed: %s", sig["id"], e)
+            continue
+        changed = changed or bool(events)
+        if sig.get("silent"):
             continue
         dec = (m.contract_info(sig["symbol"]) or {}).get("price_decimals")
         for ev in events:
@@ -375,6 +488,9 @@ HELP = """<b>Команды</b>
 /stop — стоп-кран: закрыть сделки бота и выключить автоторговлю
 /limits 2 6 — макс. позиций и дневной стоп в % бюджета
 /selftest — проверка ордеров на демо
+/app — мини-приложение: сделки, причины, обучение
+/learn — чему бот научился: какие условия и монеты дают плюс/минус
+/universe 30 — сколько альтов сканировать (топ по объёму)
 /balance — бюджет, которым бот распоряжается
 
 Бот проверяет монеты после закрытия каждой часовой свечи и пишет, только когда есть отбой от сильного уровня по направлению старшего тренда (1d+4h). Обычно это 1–3 сигнала в день на 3 монеты, бывают дни без сигналов. Ордеров он не ставит."""
@@ -458,6 +574,24 @@ def handle(st, msg):
         send(f"Готово: {key} = {val:g}")
     elif cmd == "/status":
         send(status_text(st))
+    elif cmd == "/app":
+        if not WEBAPP_URL:
+            send("Мини-приложение не настроено: нет WEBAPP_URL.")
+        else:
+            tg("sendMessage", chat_id=ADMIN_ID, text="Панель бота: сделки, причины входов, обучение.",
+               reply_markup={"inline_keyboard": [[{"text": "📊 Открыть панель", "web_app": {"url": WEBAPP_URL}}]]})
+    elif cmd == "/learn":
+        send(ln.report(st["signals"]))
+    elif cmd == "/universe":
+        if args:
+            try:
+                se["universe_n"] = max(0, min(60, int(args[0])))
+                st["universe"] = {}
+            except ValueError:
+                pass
+        syms = universe(st)
+        send(f"Сканирую {len(syms)} монет (основные + топ-{se['universe_n']} альтов по объёму):\n"
+             + ", ".join(s.split("-")[0] for s in syms))
     elif cmd == "/autotrade":
         if not TRADER:
             send("Автоторговля не подключена: на хостинге не заданы TRADING_MODE и ключи BingX.")
@@ -533,7 +667,19 @@ def main():
             except Exception as e:
                 log.error("TRADER init failed:\n%s", traceback.format_exc())
                 trade_note = f"⚠️ не смог подключиться к BingX: {html.escape(str(e))[:200]} — только сигналы"
-    send(f"✅ Бот запущен. Слежу за: {', '.join(st['settings']['watch'])}.\n{trade_note}\n/help — команды.")
+    save_state(st)
+    try:
+        web.start(int(os.environ.get("PORT", "8000")), STATE_FILE, TOKEN, ADMIN_ID, TRADING_MODE)
+    except Exception as e:
+        log.error("web app failed to start: %s", e)
+    if WEBAPP_URL:
+        try:
+            tg("setChatMenuButton", chat_id=ADMIN_ID,
+               menu_button={"type": "web_app", "text": "Панель", "web_app": {"url": WEBAPP_URL}})
+        except Exception as e:
+            log.warning("menu button: %s", e)
+    send(f"✅ Бот запущен. Сканирую основные монеты + топ-{st['settings']['universe_n']} альтов.\n"
+         f"{trade_note}\n/help — команды" + (", кнопка «Панель» внизу — мини-приложение." if WEBAPP_URL else "."))
 
     next_scan = next_boundary(15, 25)
     next_track = next_boundary(5, 20)
@@ -554,7 +700,9 @@ def main():
                 manage_trades(st)
                 next_manage = time.time() + 60
             if time.time() >= next_track:
+                update_live(st)
                 track(st)
+                save_state(st)
                 digest(st)
                 next_track = next_boundary(5, 20)
             if time.time() >= next_scan:

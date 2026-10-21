@@ -212,7 +212,9 @@ class Limits(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("дневной", why)
         st["trades"] = [{"symbol": "X", "status": "closed", "pnl_usd": -16, "closed_day": "2000-01-01"}]
-        self.assertFalse(ex.can_trade(st, "SOL-USDT")[0])           # total drawdown
+        self.assertTrue(ex.can_trade(st, "SOL-USDT")[0])            # demo keeps learning past -30%
+        live = exm.Trader(FakeExchange(), "live")
+        self.assertFalse(live.can_trade(st, "SOL-USDT")[0])         # live: total drawdown halts
         self.assertFalse(st["settings"]["auto"])
         st["settings"]["auto"] = False
         self.assertIn("выключена", ex.can_trade(state(auto=False), "SOL-USDT")[1])

@@ -11,6 +11,7 @@ import argparse
 import itertools
 import time
 
+import learner as ln
 import market as m
 import signals as sg
 import tracker as tr
@@ -34,8 +35,11 @@ def history(symbol, interval, start_ms, end_ms):
     return [rows[t] for t in sorted(rows)]
 
 
-def prepare(symbol, days):
-    """Fetch history and precompute the context at every closed 15m candle."""
+def prepare(symbol, days, btc_htf=None):
+    """Fetch history and precompute the context at every closed 15m candle.
+
+    `btc_htf` maps candle close time -> BTC 1d+4h trend score, used by the BTC filter.
+    """
     now = int(time.time() * 1000)
     start = now - days * MS["1d"]
     m15 = history(symbol, "15m", start - 3 * MS["1d"], now)
@@ -53,11 +57,15 @@ def prepare(symbol, days):
             j4 += 1
         while jd < len(d1) and d1[jd]["t"] + MS["1d"] <= t_close:
             jd += 1
+        new_hour = t_close % MS["1h"] == 0
         if bar["t"] < start or j1 < 60 or j4 < 60 or jd < 60:
             continue
+        if btc_htf is not None and not new_hour:
+            continue                      # alt runs use the 1h trigger only: skip 15m steps to save time
         ctx = sg.context_from(symbol, d1[max(0, jd - 300):jd], h4[max(0, j4 - 500):j4],
                               h1[max(0, j1 - 500):j1], m15[max(0, i - 199):i + 1], bar["c"])
-        new_hour = t_close % MS["1h"] == 0
+        if btc_htf is not None:
+            ctx["btc_htf"] = btc_htf.get(t_close)
         steps.append((i, t_close, new_hour, ctx))
     return {"symbol": symbol, "m15": m15, "steps": steps, "contract": m.contract_info(symbol)}
 
@@ -87,6 +95,8 @@ def simulate(data, p, t_from=0, t_to=None, balance=50, risk=2, lev=20):
                 w = tr._weights(sig)
                 sig["realized_r"] += sum(w[sig["tp_hit"]:]) * tr._r(sig, horizon[-1]["c"])
                 sig["status"], sig["result"] = "closed", "expired"
+                sig["closed_t"] = expiry / 1000
+            sig.update(variant=p.get("_name", "base"), btc_htf=ctx.get("btc_htf"))
             sigs.append(sig)
     return sigs
 
@@ -98,14 +108,84 @@ def line(st):
             f"total {st['sum_r']:+6.1f}R  ~{st['usd']:+7.2f}$")
 
 
+VARIANTS = {
+    "base (BTC-фильтр выкл)": {},
+    "base + BTC soft": {"btc_filter": "soft"},
+    "base + BTC strict": {"btc_filter": "strict"},
+    "bounce+retest, BTC soft": {"kinds": ("bounce", "retest"), "btc_filter": "soft"},
+    "без фильтра тренда, BTC soft": {"trend_only": False, "btc_filter": "soft"},
+    "стоп 0.8 ATR, BTC soft": {"stop_atr": 0.8, "tp1_min_r": 1.5, "btc_filter": "soft"},
+}
+
+
+def run_alts(top, days):
+    btc = prepare("BTC-USDT", days)
+    btc_htf = {t: sg.htf_score(ctx) for _, t, _, ctx in btc["steps"]}
+    syms = m.top_symbols(top, exclude={"BTC-USDT", "ETH-USDT", "SOL-USDT"})
+    print(f"alts ({len(syms)}): {', '.join(s.split('-')[0] for s in syms)}", flush=True)
+    datas = []
+    for sym in syms:
+        try:
+            t0 = time.time()
+            datas.append(prepare(sym, days, btc_htf))
+            print(f"  {sym}: {len(datas[-1]['steps'])} steps, {time.time() - t0:.0f}s", flush=True)
+        except Exception as e:
+            print(f"  {sym}: skipped ({e})", flush=True)
+    print(f"\nRules chosen on BTC/ETH/SOL, tested on {len(datas)} alts over {days}d (out-of-sample for alts):")
+    for name, p in VARIANTS.items():
+        sigs = sum((simulate(d, p) for d in datas), [])
+        print(f"  {name:32s} {line(tr.stats(sigs))}  ~{len(sigs) / days:.1f}/day")
+    sigs = {d["symbol"]: simulate(d, VARIANTS["base + BTC soft"]) for d in datas}
+    print("\nbase + BTC soft by symbol:")
+    for sym, ss in sorted(sigs.items(), key=lambda kv: -(tr.stats(kv[1]) or {"sum_r": 0})["sum_r"]):
+        st = tr.stats(ss)
+        if st:
+            print(f"  {sym:14s} {line(st)}")
+    by_side = {}
+    for ss in sigs.values():
+        for s in ss:
+            by_side.setdefault(s["side"], []).append(s)
+    for side, ss in by_side.items():
+        print(f"  side {side:5s}: {line(tr.stats(ss))}")
+
+    # walk-forward learner: the bot only knows results of signals closed before each new one
+    print("\nWalk-forward learner (decisions use only results closed before the signal):")
+    for vset in (["base"], ["base", "retest", "range"]):
+        pool = []
+        for name in vset:
+            p = {**dict(sg.VARIANTS)[name], "_name": name}
+            for d in datas:
+                pool += simulate(d, p)
+        pool = [s for s in pool if s["status"] == "closed"]
+        pool.sort(key=lambda s: s["sent_at"])
+        kept, done = [], []
+        for s in pool:
+            hist = [x for x in done if x["closed_t"] <= s["sent_at"]]
+            if ln.decide(s, hist)[0]:
+                kept.append(s)
+            done.append(s)
+        third = pool[0]["sent_at"] + (pool[-1]["sent_at"] - pool[0]["sent_at"]) * 2 / 3
+        late_all = [s for s in pool if s["sent_at"] >= third]
+        late_kept = [s for s in kept if s["sent_at"] >= third]
+        print(f"  variants {'+'.join(vset)}")
+        print(f"    all signals     : {line(tr.stats(pool))}")
+        print(f"    learner kept    : {line(tr.stats(kept))}")
+        print(f"    last third, all : {line(tr.stats(late_all))}")
+        print(f"    last third, kept: {line(tr.stats(late_kept))}")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("symbols", nargs="+")
+    ap.add_argument("symbols", nargs="*")
+    ap.add_argument("--alts", type=int, default=0, help="test on the top-N alts by volume")
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--grid", action="store_true")
     ap.add_argument("--oos-days", type=int, default=30)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+    if args.alts:
+        run_alts(args.alts, args.days)
+        return
 
     datas = []
     for sym in args.symbols:
