@@ -220,6 +220,11 @@ function render(d) {
       <div class="row"><span>Сигналы, которые обучение советовало пропустить</span><span>${d.advice_check.advised ? `${d.advice_check.advised.closed} шт · ${signed(d.advice_check.advised.avg_r)}R` : "—"}</span></div>
       <div class="row"><span>Остальные сигналы</span><span>${d.advice_check.not_advised ? `${d.advice_check.not_advised.closed} шт · ${signed(d.advice_check.not_advised.avg_r)}R` : "—"}</span></div>
       <p class="meta">Если у «советовало пропустить» результат заметно хуже — обучению можно доверять на реальном счёте.</p></div>
+    <div class="card"><h2>Telegram-каналы</h2>${(d.channels || []).length ? d.channels.map((c) => `
+      <div class="trade"><div class="h"><span class="sym grow">@${esc(c.name)}</span></div>
+        <div class="meta">История на BingX: ${c.hist && c.hist.closed ? `${c.hist.closed} сетапов за ${num(c.hist.days, 0)} дн., ${num(c.hist.winrate, 0)}% в плюс, в среднем ${signed(c.hist.avg_r)}R` : "считается…"}</div>
+        <div class="meta">С момента подключения: ${c.live ? `${c.live.closed} закрыто, ${num(c.live.winrate, 0)}% в плюс, ${signed(c.live.avg_r)}R` : "сигналов ещё нет"}</div></div>`).join("") : `<div class="empty">каналы не подключены</div>`}
+      <p class="meta">Из постов берутся только тикер, направление, стоп и цели. Сетап пропускается, если цифры противоречат друг другу или цена на BingX отличается от поста больше чем на 5%. Результаты канала учитываются в обучении отдельной строкой «tg:имя».</p></div>
     ${bucketTable(by("variant"), rules, "Варианты правил")}
     ${bucketTable(by("side+btc"), rules, "Направление × тренд BTC", sideRu)}
     ${bucketTable(by("group+side"), rules, "Группа монет × направление", sideRu)}

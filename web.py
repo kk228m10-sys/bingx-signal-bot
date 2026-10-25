@@ -90,9 +90,12 @@ def build_view(st, mode):
         "generated_at": time.time(),
         "mode": mode,
         "settings": {k: se.get(k) for k in ("balance", "risk", "leverage", "auto", "max_positions",
-                                            "daily_loss_pct", "max_dd_pct", "universe_n", "watch")},
+                                            "daily_loss_pct", "max_dd_pct", "universe_n", "watch", "channels")},
         "live": st.get("live", {}),
         "universe": (st.get("universe") or {}).get("alts", []),
+        "channels": [{"name": n, "hist": ((st.get("channels_info") or {}).get(n) or {}).get("hist"),
+                      "live": tr.stats([s for s in signals if s.get("variant") == f"tg:{n}"])}
+                     for n in se.get("channels", [])],
         "trades_open": [trade_view(t) for t in trades if t.get("status") == "open"],
         "trades_closed": [trade_view(t) for t in sorted(
             (t for t in trades if t.get("status") == "closed"), key=lambda t: -(t.get("closed_at") or 0))[:100]],

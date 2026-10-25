@@ -6,7 +6,9 @@ import html
 import json
 import logging
 import os
+import re
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -19,6 +21,8 @@ from pathlib import Path
 import learner as ln
 import market as m
 import signals as sg
+import channel as chn
+import eval_channel
 import tracker as tr
 import web
 
@@ -62,11 +66,12 @@ DEFAULTS = {"balance": 50.0, "risk": 2.0, "leverage": 20.0,
             "watch": ["BTC-USDT", "ETH-USDT", "SOL-USDT"], "paused": False,
             # auto-trading: demo starts enabled, live must be switched on with /autotrade on
             "auto": TRADING_MODE == "demo", "max_positions": 2,
-            "daily_loss_pct": 6.0, "max_dd_pct": 30.0, "universe_n": 30}
+            "daily_loss_pct": 6.0, "max_dd_pct": 30.0, "universe_n": 30,
+            "channels": ["futures_club11"]}
 
 # demo is for learning: more parallel positions and a wider daily limit (the risk per trade stays the same)
 DEMO_PROFILE = {"max_positions": 5, "daily_loss_pct": 15.0}
-PROFILE_VERSION = 2
+PROFILE_VERSION = 3
 
 
 # --------------------------------------------------------------------------- state
@@ -87,8 +92,10 @@ def load_state():
     st.setdefault("digest_day", "")
     se = st["settings"]
     if se.get("profile_v", 0) < PROFILE_VERSION:
-        if TRADING_MODE == "demo":
+        if TRADING_MODE == "demo" and se.get("profile_v", 0) < 2:
             se.update(DEMO_PROFILE)
+        if "futures_club11" not in se["channels"]:
+            se["channels"].append("futures_club11")
         se["profile_v"] = PROFILE_VERSION
     return st
 
@@ -130,7 +137,7 @@ def local(ts_ms):
 # --------------------------------------------------------------------------- formatting
 
 P = sg.fmt_price
-KIND = {"bounce": "отбой от уровня", "retest": "ретест пробитого уровня"}
+KIND = {"bounce": "отбой от уровня", "retest": "ретест пробитого уровня", "channel": "сетап из канала"}
 ARROW = lambda s: "↑" if s >= 3 else "↓" if s <= -3 else "→"
 
 
@@ -147,9 +154,10 @@ def fmt_signal(s, sz, ctx, st):
     lines = [
         f"{head} <b>{s['symbol']}</b> · {KIND[s['kind']]}",
         f"Уверенность: {s['confidence']}",
-        f"Уровень {pp(s['level'])} (касаний: {s['touches']})",
+        (f"Источник: пост #{s.get('post_id')} в @{s.get('channel')}" if s["kind"] == "channel"
+         else f"Уровень {pp(s['level'])} (касаний: {s['touches']})"),
         "",
-        f"Вход: <b>по рынку ≈ {pp(s['entry'])}</b> (или лимит {pp(s['limit'])})",
+        f"Вход: <b>по рынку ≈ {pp(s['entry'])}</b>" + ("" if s["kind"] == "channel" else f" (или лимит {pp(s['limit'])})"),
         f"Стоп: <b>{pp(s['stop'])}</b> (−{stop_pct:.2f}%)",
     ]
     for i, (tp, r) in enumerate(zip(s["tps"], s["tp_r"])):
@@ -175,7 +183,9 @@ def fmt_signal(s, sz, ctx, st):
         f"Фон: 1d {ARROW(ctx['score_d1'])} · 4h {ARROW(ctx['score_h4'])} · 1h {ARROW(ctx['score_h1'])} · "
         f"RSI 1h {ctx['rsi1h']:.0f} · funding {fund}",
         f"Вход актуален ~30 мин, пока цена не ушла дальше {pp(s['entry'] + (1 if long_ else -1) * 0.3 * abs(s['entry'] - s['stop']))}",
-        f"<i>Часовая свеча закрылась {local(s['bar_close'])}. Это сигнал по правилам, не гарантия; решение за тобой.</i>",
+        (f"<i>Пост из канала @{s.get('channel')}, разобран {local(s['bar_close'])}. Это чужой сетап, проверенный на BingX, не гарантия.</i>"
+         if s["kind"] == "channel" else
+         f"<i>Часовая свеча закрылась {local(s['bar_close'])}. Это сигнал по правилам, не гарантия; решение за тобой.</i>"),
     ]
     return "\n".join(lines)
 
@@ -344,6 +354,142 @@ def scan(st, manual=False):
     return shown
 
 
+# --------------------------------------------------------------------------- telegram channels
+
+CHANNEL_MAX_AGE_S = 2 * 3600       # only fresh posts are traded
+CHANNEL_PRICE_GAP = 0.05           # BingX price within 5% of the post, else it is another coin or stale
+
+
+def channel_why(s, c, name, st):
+    fp = sg.fmt_price
+    long_ = s["side"] == "long"
+    gap = (s["entry"] / c["entry"] - 1) * 100
+    out = [f"Сетап из канала @{name} (пост #{c['post_id']}): {'лонг' if long_ else 'шорт'} {c['ticker']}, "
+           f"в посте цена {fp(c['entry'])}, стоп {fp(c['stop'])}, цели " + " / ".join(fp(x) for x in c["tps"]) + ".",
+           f"Цена на BingX {fp(s['entry'])} (отличие от поста {gap:+.1f}%) — вход по рынку.",
+           f"Стоп {abs(s['entry'] - s['stop']) / s['entry'] * 100:.1f}% от входа: объём считаю так, чтобы риск "
+           f"остался {min(st['settings']['risk'], 2):g}% бюджета; плечо снижается, чтобы ликвидация была дальше стопа."]
+    h = (st.get("channels_info") or {}).get(name, {}).get("hist")
+    if h and h.get("closed"):
+        out.append(f"История канала на BingX за {h['days']:.0f} дн.: {h['closed']} сетапов, {h['winrate']:.0f}% в плюс, "
+                   f"в среднем {h['avg_r']:+.2f}R на сделку (стоп в безубыток после первой цели).")
+    btc = s.get("btc_htf")
+    if btc is not None:
+        out.append(f"Биткоин сейчас: тренд {btc:+d} — сделка {'по' if (btc >= 0) == long_ else 'против'} BTC.")
+    excerpt = " ".join(c["text"].split())[:220]
+    out.append(f"Из поста: «{excerpt}{'…' if len(c['text']) > 220 else ''}»")
+    out.append("После первой цели стоп переносится в безубыток.")
+    return out
+
+
+def handle_channel_setup(st, name, c):
+    se = st["settings"]
+    sym, side, variant = f"{c['ticker']}-USDT", c["side"], f"tg:{name}"
+    contract = m.contract_info(sym)
+    if contract is None:
+        note(st, sym, side, variant, "skipped", f"пост #{c['post_id']}: монеты нет на BingX")
+        return
+    try:
+        ctx = sg.build_context(sym)
+    except Exception as e:
+        note(st, sym, side, variant, "skipped", f"пост #{c['post_id']}: нет данных BingX ({e})")
+        return
+    price, sign = ctx["price"], (1 if side == "long" else -1)
+    if abs(price / c["entry"] - 1) > CHANNEL_PRICE_GAP:
+        note(st, sym, side, variant, "skipped",
+             f"пост #{c['post_id']}: цена на BingX {price:g} далеко от поста {c['entry']:g} — другая монета или пост устарел")
+        return
+    tps = [tp for tp in c["tps"] if sign * (tp - price) > 0]
+    if sign * (price - c["stop"]) <= 0 or not tps:
+        note(st, sym, side, variant, "skipped", f"пост #{c['post_id']}: цена уже за стопом или за целями")
+        return
+    fee, risk = 0.0005, abs(price - c["stop"])
+    btc_htf = (st.get("live") or {}).get("btc_htf")
+    ctx["btc_htf"] = btc_htf
+    now_ms = int(time.time() * 1000)
+    s = {"symbol": sym, "side": side, "kind": "channel", "level": None, "touches": 0, "entry": price,
+         "stop": c["stop"], "tps": tps, "limit": c["entry"], "confidence": f"канал @{name}",
+         "tp_r": [(sign * (tp - price) - (price + tp) * fee) / (risk + (price + c["stop"]) * fee) for tp in tps],
+         "bar_t": now_ms, "bar_close": now_ms, "variant": variant, "btc_htf": btc_htf,
+         "post_id": c["post_id"], "channel": name}
+    s["why"] = channel_why(s, c, name, st)
+    sz = sg.size(side, price, c["stop"], se["balance"], se["risk"], se["leverage"], contract, n_parts=len(tps))
+    rec = record_signal(st, s, sz)
+    rec.update(channel=name, post_id=c["post_id"])
+    log.info("channel setup %s %s %s from @%s #%s", sym, side, price, name, c["post_id"])
+
+    act_key = f"{sym}:{side}"
+    if time.time() - st["cooldown"].get(act_key, 0) < COOLDOWN_H * 3600:
+        note(st, sym, side, variant, "watch", "по этой монете и направлению недавно уже был вход")
+        return
+    live = TRADING_MODE == "live"
+    ok, why = ln.decide(s, st["signals"], live=live)
+    rec["advice"] = "" if ok else why
+    if not ok and live:
+        note(st, sym, side, variant, "blocked", why)
+        return
+    if rec["advice"]:
+        s["why"] = s["why"] + [f"⚠️ Обучение советовало бы пропустить: {why}. На демо всё равно вхожу, чтобы проверить совет."]
+    st["cooldown"][act_key] = time.time()
+    if TRADER and se.get("auto"):
+        execute(st, s, sz, ctx, contract)
+    elif not se.get("paused"):
+        send(fmt_signal(s, sz, ctx, st))
+        rec["silent"] = False
+        note(st, sym, side, variant, "shown", "сигнал из канала отправлен в чат")
+
+
+def process_channels(st):
+    seen = st.setdefault("channel_seen", {})
+    for name in st["settings"].get("channels", []):
+        try:
+            posts = chn.parse_posts(chn.fetch_page(name))
+        except Exception as e:
+            log.warning("channel %s: %s", name, e)
+            continue
+        if not posts:
+            continue
+        if name not in seen:                    # first contact: remember where we are, do not trade history
+            seen[name] = max(p[0] for p in posts)
+            log.info("channel %s: start after post %s", name, seen[name])
+            continue
+        new = [p for p in posts if p[0] > seen[name]]
+        if not new:
+            continue
+        seen[name] = max(p[0] for p in new)
+        for c in chn.setups(new):
+            if time.time() - c["ts"] <= CHANNEL_MAX_AGE_S:
+                try:
+                    handle_channel_setup(st, name, c)
+                except Exception:
+                    log.error("channel setup failed:\n%s", traceback.format_exc())
+    save_state(st)
+
+
+def refresh_channel_history(st):
+    """Re-score each channel's history on BingX once a day, in a background thread."""
+    info = st.setdefault("channels_info", {})
+    todo = [n for n in st["settings"].get("channels", [])
+            if time.time() - (info.get(n, {}).get("hist") or {}).get("t", 0) > 24 * 3600]
+    if not todo or getattr(refresh_channel_history, "busy", False):
+        return
+
+    def work():
+        refresh_channel_history.busy = True
+        try:
+            for n in todo:
+                try:
+                    info.setdefault(n, {})["hist"] = eval_channel.summarize(n, pages=40)
+                    log.info("channel %s history: %s", n, info[n]["hist"])
+                except Exception as e:
+                    log.warning("channel %s history failed: %s", n, e)
+                    info.setdefault(n, {})["hist"] = {"t": time.time(), "error": str(e)[:200]}
+        finally:
+            refresh_channel_history.busy = False
+
+    threading.Thread(target=work, name="channel-history", daemon=True).start()
+
+
 def execute(st, s, sz, ctx, contract):
     ok, why = TRADER.can_trade(st, s["symbol"])
     if not ok:
@@ -496,9 +642,10 @@ HELP = """<b>Команды</b>
 /app — мини-приложение: сделки, причины, обучение
 /learn — чему бот научился: какие условия и монеты дают плюс/минус
 /universe 30 — сколько альтов сканировать (топ по объёму)
+/channels — Telegram-каналы, на которых бот учится · /addchannel имя · /delchannel имя
 /balance — бюджет, которым бот распоряжается
 
-Бот проверяет монеты после закрытия каждой часовой свечи и пишет, только когда есть отбой от сильного уровня по направлению старшего тренда (1d+4h). Обычно это 1–3 сигнала в день на 3 монеты, бывают дни без сигналов. Ордеров он не ставит."""
+Каждый час бот проверяет BTC/ETH/SOL и топ альтов по объёму, каждые 15 минут читает подключённые Telegram-каналы. Все сетапы он записывает и учится на их результатах; при включённой автоторговле сам входит на BingX с лимитами риска. Подробности и причины каждого входа — в /app."""
 
 
 def handle(st, msg):
@@ -585,6 +732,34 @@ def handle(st, msg):
         else:
             tg("sendMessage", chat_id=ADMIN_ID, text="Панель бота: сделки, причины входов, обучение.",
                reply_markup={"inline_keyboard": [[{"text": "📊 Открыть панель", "web_app": {"url": WEBAPP_URL}}]]})
+    elif cmd == "/channels":
+        info = st.get("channels_info") or {}
+        lines = []
+        for n in se.get("channels", []):
+            h = (info.get(n) or {}).get("hist") or {}
+            hist = (f"история: {h['closed']} сетапов, {h['winrate']:.0f}% в плюс, {h['avg_r']:+.2f}R"
+                    if h.get("closed") else "история считается…")
+            lines.append(f"@{n} — {hist}")
+        send("Каналы, на которых бот учится:\n" + ("\n".join(lines) or "нет")
+             + "\n/addchannel имя · /delchannel имя")
+    elif cmd in ("/addchannel", "/delchannel") and args:
+        name = args[0].lstrip("@").split("/")[-1]
+        if not re.fullmatch(r"[A-Za-z0-9_]{4,32}", name):
+            send("Нужно имя публичного канала, например /addchannel futures_club11")
+        elif cmd == "/addchannel":
+            try:
+                ok = bool(chn.parse_posts(chn.fetch_page(name)))
+            except Exception:
+                ok = False
+            if not ok:
+                send(f"Не смог прочитать @{name}: канал закрытый или у него нет веб-версии.")
+            elif name not in se["channels"]:
+                se["channels"].append(name)
+                send(f"Добавил @{name}. Читаю новые посты каждые 15 минут, историю пересчитаю в течение часа.")
+        else:
+            if name in se["channels"]:
+                se["channels"].remove(name)
+            send("Каналы: " + (", ".join("@" + c for c in se["channels"]) or "нет"))
     elif cmd == "/learn":
         send(ln.report(st["signals"]))
     elif cmd == "/universe":
@@ -713,6 +888,8 @@ def main():
             if time.time() >= next_scan:
                 if not st["settings"]["paused"]:
                     scan(st)
+                    process_channels(st)
+                refresh_channel_history(st)
                 next_scan = next_boundary(15, 25)
             errors = 0
         except urllib.error.HTTPError as e:

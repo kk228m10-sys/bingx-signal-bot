@@ -168,9 +168,10 @@ class Trader:
             self.close_now(sym, side, pos["qty"])
             return None, "АВАРИЯ: стоп не выставился, позиция сразу закрыта по рынку"
 
-        parts = sg.size(side, pos["entry"], s["stop"], budget, risk_pct, lev, contract)["parts"]
+        n_tp = len(s["tps"])
+        parts = sg.size(side, pos["entry"], s["stop"], budget, risk_pct, lev, contract, n_parts=n_tp)["parts"]
         if abs(sum(parts) - pos["qty"]) > 1e-9:
-            parts = [pos["qty"], 0.0, 0.0]
+            parts = [pos["qty"]] + [0.0] * (n_tp - 1)
         tps, problems = [], []
         for price, q in zip(s["tps"], parts):
             if q <= 0:

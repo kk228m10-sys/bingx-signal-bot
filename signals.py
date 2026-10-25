@@ -266,7 +266,7 @@ def explain(ctx, s, p, bar):
 
 # --------------------------------------------------------------------------- sizing
 
-def size(side, entry, stop, balance, risk_pct, leverage, contract=None):
+def size(side, entry, stop, balance, risk_pct, leverage, contract=None, n_parts=3):
     contract = contract or {}
     fee = contract.get("taker_fee") or 0.0005
     step = contract.get("qty_step")
@@ -290,15 +290,14 @@ def size(side, entry, stop, balance, risk_pct, leverage, contract=None):
     if (side == "long" and stop <= liq) or (side == "short" and stop >= liq):
         warn.append("ЛИКВИДАЦИЯ РАНЬШЕ СТОПА")
 
-    # split into three parts for TP1/TP2/TP3
-    parts = [qty, 0.0, 0.0]
+    # split into one part per take-profit (up to three)
+    k = max(1, min(3, n_parts))
+    parts = [qty] + [0.0] * (k - 1)
     if step:
         n = int(round(qty / step))
-        if n >= 3:
-            base, extra = divmod(n, 3)
-            parts = [round((base + (1 if i < extra else 0)) * step, 10) for i in range(3)]
-        elif n == 2:
-            parts = [step, step, 0.0]
+        use = max(1, min(k, n))
+        base, extra = divmod(n, use)
+        parts = [round((base + (1 if i < extra else 0)) * step, 10) for i in range(use)] + [0.0] * (k - use)
     return {"qty": qty, "notional": notional, "margin": margin, "risk_usd": qty * per_unit,
             "liq": liq, "parts": parts, "fee": fee, "warnings": warn}
 
