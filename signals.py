@@ -6,6 +6,8 @@ Rules are deterministic so every signal can be checked afterwards:
 Higher timeframes (1d + 4h trend score) filter direction; funding filters crowding.
 All thresholds live in PARAMS so backtest.py can test them.
 """
+import time
+
 import market as m
 
 FUNDING_MAX = 0.0005      # 0.05% per 8h: beyond this one side is crowded
@@ -38,22 +40,39 @@ VARIANTS = [
     ("base", {}),
     ("retest", {"kinds": ("retest",)}),
     ("range", {"trend_only": False}),
+    # 15-minute triggers: many more setups for learning; in the BTC/ETH/SOL backtest they were the
+    # weakest group, so live mode will only trade them if they prove themselves on demo
+    ("base15", {"trigger": "15m"}),
+    ("range15", {"trigger": "15m", "trend_only": False}),
 ]
 
 
 # --------------------------------------------------------------------------- context
 
-def build_context(symbol):
-    d1 = m.closed(m.klines(symbol, "1d", 300))
-    h4 = m.closed(m.klines(symbol, "4h", 500))
-    h1 = m.closed(m.klines(symbol, "1h", 500))
+_INTERVAL_MS = {"1d": 86_400_000, "4h": 14_400_000, "1h": 3_600_000}
+_KCACHE = {}      # (symbol, interval) -> rows; refetched only after a new candle has closed
+
+
+def _cached_klines(symbol, interval, limit):
+    rows = _KCACHE.get((symbol, interval))
+    if not rows or time.time() * 1000 >= rows[-1]["t"] + _INTERVAL_MS[interval]:
+        rows = m.klines(symbol, interval, limit)
+        _KCACHE[(symbol, interval)] = rows
+    return rows
+
+
+def build_context(symbol, with_oi=False):
+    """Higher timeframes come from a cache that refreshes on candle close; 15m is always fresh."""
+    d1 = m.closed(_cached_klines(symbol, "1d", 260))
+    h4 = m.closed(_cached_klines(symbol, "4h", 260))
+    h1 = m.closed(_cached_klines(symbol, "1h", 360))
     m15_all = m.klines(symbol, "15m", 200)
     try:
         prem = m.premium(symbol)
     except RuntimeError:
         prem = {"mark": None, "funding": None}
     return context_from(symbol, d1, h4, h1, m.closed(m15_all), m15_all[-1]["c"],
-                        prem.get("funding"), m.open_interest(symbol))
+                        prem.get("funding"), m.open_interest(symbol) if with_oi else None)
 
 
 def context_from(symbol, d1, h4, h1, m15, price, funding=None, oi=None):

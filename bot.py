@@ -53,7 +53,7 @@ if TRADING_MODE not in ("off", "demo", "live"):
 TRADER = None          # set in main() when TRADING_MODE is demo/live
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()   # https address of the mini app (Bothost domain)
 
-COOLDOWN_H = 4           # same symbol + side not repeated within this window
+COOLDOWN_H = 2 if TRADING_MODE == "demo" else 4   # same symbol + side not repeated within this window
 DIGEST_HOUR = 9          # local hour for the morning overview
 
 logging.basicConfig(
@@ -70,8 +70,10 @@ DEFAULTS = {"balance": 50.0, "risk": 2.0, "leverage": 20.0,
             "channels": ["futures_club11"]}
 
 # demo is for learning: more parallel positions and a wider daily limit (the risk per trade stays the same)
-DEMO_PROFILE = {"max_positions": 5, "daily_loss_pct": 15.0}
-PROFILE_VERSION = 3
+# demo is for learning: many parallel positions; risk per trade stays the same as on the real account
+DEMO_PROFILE = {"max_positions": 20, "daily_loss_pct": 40.0, "universe_n": 60}
+PROFILE_VERSION = 4
+MAX_POSITIONS_CAP = 20 if TRADING_MODE == "demo" else 5
 
 
 # --------------------------------------------------------------------------- state
@@ -92,7 +94,7 @@ def load_state():
     st.setdefault("digest_day", "")
     se = st["settings"]
     if se.get("profile_v", 0) < PROFILE_VERSION:
-        if TRADING_MODE == "demo" and se.get("profile_v", 0) < 2:
+        if TRADING_MODE == "demo" and se.get("profile_v", 0) < 4:
             se.update(DEMO_PROFILE)
         if "futures_club11" not in se["channels"]:
             se["channels"].append("futures_club11")
@@ -281,17 +283,18 @@ def scan(st, manual=False):
     except Exception as e:
         log.warning("BTC context failed: %s", e)
         return 0
-    hour_t = btc_ctx["h1"][-1]["t"]
-    if not manual and st["last_bar"].get("_hour") == hour_t:
-        return 0                                   # all variants trigger on 1h closes
-    st["last_bar"]["_hour"] = hour_t
+    hour_t, q_t = btc_ctx["h1"][-1]["t"], btc_ctx["m15"][-1]["t"]
+    if not manual and st["last_bar"].get("_q") == q_t:
+        return 0                                   # nothing new since the last 15m close
+    new_hour = manual or st["last_bar"].get("_hour") != hour_t
+    st["last_bar"].update(_hour=hour_t, _q=q_t)
     btc_htf = sg.htf_score(btc_ctx)
     syms = universe(st)
     st.setdefault("live", {}).update(btc_htf=btc_htf, btc_price=btc_ctx["price"], last_scan=time.time(),
                                      scanned=len(syms))
     found = shown = 0
     contexts = {"BTC-USDT": btc_ctx}
-    with ThreadPoolExecutor(max_workers=6) as pool:          # market data is fetched in parallel
+    with ThreadPoolExecutor(max_workers=16) as pool:         # market data is fetched in parallel
         futures = {pool.submit(sg.build_context, s): s for s in syms if s != "BTC-USDT"}
         for f, s in futures.items():
             try:
@@ -306,6 +309,8 @@ def scan(st, manual=False):
         contract = m.contract_info(sym)
         candidates = []
         for vname, vp in sg.VARIANTS:
+            if vp.get("trigger", sg.PARAMS["trigger"]) == "1h" and not new_hour:
+                continue
             for s in sg.find_setups(ctx, vp):
                 key = f"{sym}:{s['side']}:{vname}"
                 if time.time() - st["cooldown"].get(key, 0) < COOLDOWN_H * 3600:
@@ -528,14 +533,19 @@ def manage_trades(st):
 
 def track(st):
     changed = False
-    for sig in st["signals"]:
-        if sig["status"] != "open":
+    opened = [s for s in st["signals"] if s["status"] == "open"]
+    results = {}
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = {pool.submit(tr.fetch_and_update, s): i for i, s in enumerate(opened)}
+        for f, i in futures.items():
+            try:
+                results[i] = f.result()
+            except Exception as e:
+                log.warning("track %s failed: %s", opened[i]["id"], e)
+    for i, sig in enumerate(opened):
+        if i not in results:
             continue
-        try:
-            events = tr.fetch_and_update(sig)
-        except Exception as e:
-            log.warning("track %s failed: %s", sig["id"], e)
-            continue
+        events = results[i]
         changed = changed or bool(events)
         if sig.get("silent"):
             continue
@@ -613,7 +623,7 @@ def digest(st):
     st["digest_day"] = day
     save_state(st)
     try:
-        text = "☀️ <b>Утренний обзор</b>\n\n" + fmt_overview(sg.build_context("BTC-USDT"))
+        text = "☀️ <b>Утренний обзор</b>\n\n" + fmt_overview(sg.build_context("BTC-USDT", with_oi=True))
     except Exception as e:
         text = f"☀️ Утренний обзор не собрался: {html.escape(str(e))}"
     s = tr.stats(st["signals"])
@@ -668,7 +678,7 @@ def handle(st, msg):
     elif cmd == "/now":
         sym = m.norm_symbol(args[0]) if args else "BTC-USDT"
         try:
-            send(fmt_overview(sg.build_context(sym)))
+            send(fmt_overview(sg.build_context(sym, with_oi=True)))
         except Exception as e:
             send(f"Не получилось загрузить {sym}: {html.escape(str(e))}")
     elif cmd == "/scan":
@@ -792,9 +802,9 @@ def handle(st, msg):
             send("🛑 Стоп-кран: автоторговля выключена.\n" + html.escape("\n".join(msgs)))
     elif cmd == "/limits" and args:
         try:
-            se["max_positions"] = max(1, min(3, int(args[0])))
+            se["max_positions"] = max(1, min(MAX_POSITIONS_CAP, int(args[0])))
             if len(args) > 1:
-                se["daily_loss_pct"] = max(1.0, min(20.0, float(args[1])))
+                se["daily_loss_pct"] = max(1.0, min(50.0 if TRADING_MODE == "demo" else 20.0, float(args[1])))
         except ValueError:
             pass
         send(f"Лимиты: позиций до {se['max_positions']}, дневной стоп {se['daily_loss_pct']:g}% бюджета, "
